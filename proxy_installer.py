@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Interactive Proxy Installer / Uninstaller for Ubuntu
+Supported Protocols: VLESS Reality (TCP + XTLS-Vision / xHTTP)
+Author: Antigravity AI
+"""
+
+import os
+import sys
+import json
+import re
+import uuid
+import socket
+import urllib.request
+import urllib.parse
+import subprocess
+import shutil
+
+# ANSI Color Codes for Premium Terminal UI
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+BLUE = "\033[94m"
+MAGENTA = "\033[95m"
+CYAN = "\033[96m"
+BOLD = "\033[1m"
+UNDERLINE = "\033[4m"
+RESET = "\033[0m"
+
+# Header logo
+BANNER = f"""
+{CYAN}{BOLD}┌──────────────────────────────────────────────────────────┐
+│             MODERN PROXY INSTALLER & MANAGER             │
+│            Powered by Xray-core & Reality Protocol       │
+└──────────────────────────────────────────────────────────┘{RESET}
+"""
+
+def print_header(title):
+    print(f"\n{BOLD}{CYAN}=== {title} ==={RESET}\n")
+
+def print_success(msg):
+    print(f"{GREEN}{BOLD}[✔] {msg}{RESET}")
+
+def print_info(msg):
+    print(f"{BLUE}[i] {msg}{RESET}")
+
+def print_warning(msg):
+    print(f"{YELLOW}{BOLD}[!] {msg}{RESET}")
+
+def print_error(msg):
+    print(f"{RED}{BOLD}[✘] {msg}{RESET}")
+
+# ----------------- SYSTEM CHECKS -----------------
+
+def check_root():
+    """Verify that the script is run with sudo/root privileges."""
+    if os.geteuid() != 0:
+        print_error("This script must be run with root privileges (sudo).")
+        print_info("Please run: sudo python3 proxy_installer.py")
+        sys.exit(1)
+
+def check_ubuntu():
+    """Verify that the host OS is Ubuntu/Debian based."""
+    if not os.path.exists("/etc/os-release"):
+        print_warning("Could not verify OS type. Proceeding anyway...")
+        return
+    
+    with open("/etc/os-release", "r") as f:
+        content = f.read().lower()
+        if "ubuntu" not in content and "debian" not in content:
+            print_warning("This script is optimized for Ubuntu/Debian. You may experience issues.")
+
+# ----------------- GEOIP & IP AUTO-DETECTION -----------------
+
+def get_public_ip():
+    """Detect the server's public IPv4 address with failover endpoints."""
+    urls = ["https://api64.ipify.org", "https://ipinfo.io/ip", "https://icanhazip.com"]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                ip = response.read().decode('utf-8').strip()
+                if ip:
+                    return ip
+        except Exception:
+            continue
+    return None
+
+def get_geoip_info(ip):
+    """Retrieve GeoIP details for nice link naming."""
+    if not ip:
+        return {}
+    urls = [f"https://ipapi.co/{ip}/json/", f"https://ipinfo.io/{ip}/json"]
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                country_code = data.get("country_code") or data.get("country")
+                country_name = data.get("country_name") or data.get("country")
+                city = data.get("city")
+                org = data.get("org") or data.get("asn") or data.get("company", {}).get("name")
+                return {
+                    "country_code": country_code,
+                    "country_name": country_name,
+                    "city": city,
+                    "org": org
+                }
+        except Exception:
+            continue
+    return {}
+
+def get_emoji_flag(country_code):
+    """Generate Emoji Flag from a 2-letter country code."""
+    if not country_code or len(country_code) != 2:
+        return "🌐"
+    return "".join(chr(127397 + ord(c)) for c in country_code.upper())
+
+# ----------------- UTILITY FUNCTIONS -----------------
+
+def run_cmd(cmd, check=True):
+    """Execute a system command and return the result."""
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=check, shell=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print_error(f"Command failed: {cmd}")
+        print_error(f"Error: {e.stderr}")
+        if check:
+            sys.exit(1)
+        return None
+
+def is_port_in_use(port):
+    """Check if the specified TCP port is already in use on the host."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', int(port)))
+            return False
+    except socket.error:
+        return True
+
+def generate_short_id():
+    """Generate a valid short ID (8 bytes hex) for Reality."""
+    return os.urandom(8).hex()
+
+def generate_xray_keys():
+    """Call xray to generate a public/private keypair with robust parsing."""
+    try:
+        xray_path = shutil.which("xray") or "/usr/local/bin/xray"
+        output = run_cmd(f"{xray_path} x25519")
+        if not output:
+            return None, None
+            
+        private_key = ""
+        public_key = ""
+        
+        # Method 1: Case-insensitive regex matching for key labels
+        priv_match = re.search(r"private\s*key\s*:\s*([a-zA-Z0-9_\-]+)", output, re.IGNORECASE)
+        pub_match = re.search(r"public\s*key\s*:\s*([a-zA-Z0-9_\-]+)", output, re.IGNORECASE)
+        
+        if priv_match:
+            private_key = priv_match.group(1).strip()
+        if pub_match:
+            public_key = pub_match.group(1).strip()
+            
+        # Method 2: Fallback in case labels are slightly different (e.g. PrivateKey / PublicKey / Private Key)
+        if not private_key or not public_key:
+            for line in output.splitlines():
+                line_lower = line.lower().replace(" ", "").replace("_", "").replace("-", "")
+                if "privatekey" in line_lower:
+                    parts = line.split(":", 1)
+                    if len(parts) > 1:
+                        private_key = parts[1].strip()
+                elif "publickey" in line_lower:
+                    parts = line.split(":", 1)
+                    if len(parts) > 1:
+                        public_key = parts[1].strip()
+                        
+        # Method 3: Absolute fallback if there are base64-like keys printed directly
+        if not private_key or not public_key:
+            lines = [line.strip() for line in output.splitlines() if line.strip()]
+            potential_keys = []
+            for line in lines:
+                parts = line.split(":")
+                val = parts[-1].strip() if parts else line.strip()
+                # X25519 keys are usually 43 characters long
+                if len(val) == 43:
+                    potential_keys.append(val)
+            if len(potential_keys) >= 2:
+                private_key = potential_keys[0]
+                public_key = potential_keys[1]
+                
+        return private_key, public_key
+    except Exception as e:
+        print_error(f"Failed to generate Reality keys using Xray: {e}")
+        return None, None
+
+# ----------------- DEPENDENCIES & XRAY INSTALLATION -----------------
+
+def install_xray_core():
+    """Install curl, unzip, and Xray-core via its official script."""
+    print_info("Installing pre-requisites (curl, unzip)...")
+    run_cmd("apt-get update && apt-get install -y curl unzip")
+    
+    print_info("Downloading and installing/updating Xray-core via official script...")
+    # Using official install script in standalone mode
+    run_cmd("bash -c \"$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ install")
+    
+    # Check if xray is installed either in PATH or in standard /usr/local/bin
+    if shutil.which("xray") is None and not os.path.exists("/usr/local/bin/xray"):
+        print_error("Xray-core installation failed or binary is not in PATH.")
+        sys.exit(1)
+    
+    print_success("Xray-core installed successfully!")
+
+# ----------------- VLESS REALITY CORE LOGIC -----------------
+
+def setup_vless_reality(public_ip, geo_info):
+    """Interactive wizard to configure VLESS Reality and start Xray-core."""
+    print_header("VLESS Reality Configuration Wizard")
+    
+    # 1. IP Address confirmation
+    ip_addr_input = input(f"{BOLD}Confirm your Server Public IP [{public_ip}]: {RESET}").strip()
+    if not ip_addr_input or ip_addr_input.lower() in ["y", "yes", "ok"]:
+        ip_addr = public_ip
+    else:
+        ip_addr = ip_addr_input
+    
+    # 2. Port choice
+    default_port = 443
+    while True:
+        port_input = input(f"{BOLD}Enter Port for VLESS Reality [{default_port}]: {RESET}").strip()
+        if not port_input:
+            port = default_port
+        else:
+            try:
+                port = int(port_input)
+                if not (1 <= port <= 65535):
+                    raise ValueError
+            except ValueError:
+                print_error("Invalid port number. Must be between 1 and 65535.")
+                continue
+        
+        if is_port_in_use(port):
+            print_warning(f"Port {port} seems to be in use by another process.")
+            override = input(f"Do you want to use port {port} anyway? (y/N): ").strip().lower()
+            if override != 'y':
+                continue
+        break
+    
+    # 3. SNI choice
+    default_sni = "images.apple.com"
+    print_info("Reality requires a popular website to mask traffic. Good options: images.apple.com, dl.google.com, apple.com")
+    sni_domain = input(f"{BOLD}Enter SNI Domain [{default_sni}]: {RESET}").strip()
+    if not sni_domain:
+        sni_domain = default_sni
+        
+    # Dest is typically sni:443
+    dest_address = f"{sni_domain}:443"
+    
+    # 4. Transport Type
+    print("\nSelect Transport Type:")
+    print(f"  1) {BOLD}TCP (with XTLS-Vision){RESET} - Recommended for standard use, highest speed.")
+    print(f"  2) {BOLD}xHTTP{RESET} - Highly resilient modern transport protocol, great for bypassing DPI.")
+    
+    transport_choice = input(f"{BOLD}Choose option [1-2] (default 1): {RESET}").strip()
+    if transport_choice == '2':
+        transport_type = "xhttp"
+    else:
+        transport_type = "tcp"
+        
+    flow = ""
+    xhttp_path = ""
+    xhttp_mode = ""
+    
+    if transport_type == "tcp":
+        use_vision = input(f"{BOLD}Enable XTLS-Vision flow control? (Y/n): {RESET}").strip().lower()
+        if use_vision != 'n':
+            flow = "xtls-rprx-vision"
+    elif transport_type == "xhttp":
+        default_path = "/xhttp-path"
+        xhttp_path = input(f"{BOLD}Enter xHTTP Path [{default_path}]: {RESET}").strip()
+        if not xhttp_path:
+            xhttp_path = default_path
+        if not xhttp_path.startswith("/"):
+            xhttp_path = "/" + xhttp_path
+            
+        default_mode = "auto"
+        xhttp_mode = input(f"{BOLD}Enter xHTTP Mode (auto/download/upload) [{default_mode}]: {RESET}").strip().lower()
+        if xhttp_mode not in ["auto", "download", "upload"]:
+            xhttp_mode = default_mode
+
+    # 5. Nice Name / Location for Link
+    flag = get_emoji_flag(geo_info.get("country_code"))
+    city = geo_info.get("city") or "Server"
+    org = geo_info.get("org") or ""
+    # Simplify organization name (e.g. AWS, DigitalOcean, etc.)
+    org_clean = "Server"
+    if org:
+        org_lower = org.lower()
+        if "amazon" in org_lower or "aws" in org_lower:
+            org_clean = "AWS"
+        elif "digitalocean" in org_lower:
+            org_clean = "DigitalOcean"
+        elif "hetzner" in org_lower:
+            org_clean = "Hetzner"
+        elif "linode" in org_lower or "akamai" in org_lower:
+            org_clean = "Linode"
+        elif "google" in org_lower or "gcp" in org_lower:
+            org_clean = "GCP"
+        elif "cloudflare" in org_lower:
+            org_clean = "Cloudflare"
+        else:
+            # Fallback to first few words
+            org_clean = " ".join(org.split()[:2])
+
+    default_link_name = f"{flag}({org_clean}) {city}"
+    link_name = input(f"{BOLD}Enter Location / Name for connection link [{default_link_name}]: {RESET}").strip()
+    if not link_name:
+        link_name = default_link_name
+
+    # Make sure Xray-core is installed first to generate keys
+    if shutil.which("xray") is None and not os.path.exists("/usr/local/bin/xray"):
+        install_xray_core()
+        
+    # 6. Generate VLESS client parameters
+    print_info("Generating Reality cryptographic keys...")
+    private_key, public_key = generate_xray_keys()
+    if not private_key or not public_key:
+        print_error("Failed to generate keys. Aborting.")
+        # Print debug command output
+        try:
+            xray_path = shutil.which("xray") or "/usr/local/bin/xray"
+            debug_out = run_cmd(f"{xray_path} x25519", check=False)
+            print_info(f"Debug - Raw output of '{xray_path} x25519' was:\n{debug_out}")
+        except Exception as e:
+            print_error(f"Could not run debug tool: {e}")
+        return
+        
+    client_uuid = str(uuid.uuid4())
+    short_id = generate_short_id()
+    
+    # 7. Create local HTTP fallback service using Python's built-in http.server
+    # This prevents abrupt TCP RST connection drops on raw plain-text / malformed TCP probes
+    print_info("Deploying local HTTP fallback service to prevent active probing TCP RST detection...")
+    
+    fallback_port = 18080
+    while is_port_in_use(fallback_port):
+        fallback_port += 1
+        
+    print_info(f"Local HTTP fallback server will run on 127.0.0.1:{fallback_port}")
+    
+    # Run with standard permissions (removing User=nobody) to avoid any Ubuntu permission/library limits
+    fallback_service_content = f"""[Unit]
+Description=Lightweight HTTP Fallback Service for Xray
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -m http.server {fallback_port} --bind 127.0.0.1
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+"""
+    
+    try:
+        with open("/etc/systemd/system/xray-fallback.service", "w") as f:
+            f.write(fallback_service_content)
+        run_cmd("systemctl daemon-reload")
+        run_cmd("systemctl enable xray-fallback")
+        run_cmd("systemctl restart xray-fallback")
+        
+        # Verify fallback service starts successfully
+        fallback_status = run_cmd("systemctl is-active xray-fallback", check=False)
+        if fallback_status != "active":
+            print_warning("Fallback helper failed to start. Reading logs...")
+            fallback_logs = run_cmd("journalctl -u xray-fallback --no-pager -n 10", check=False)
+            print(fallback_logs)
+            fallback_port = None
+        else:
+            print_success("Local HTTP fallback service deployed and started successfully!")
+    except Exception as e:
+        print_warning(f"Could not setup local http fallback service: {e}. Falling back directly to SNI domain.")
+        fallback_port = None
+        
+    # 8. Build Xray Server config.json
+    print_info("Building Xray server configuration file...")
+    
+    inbound_config = {
+        "port": port,
+        "protocol": "vless",
+        "settings": {
+            "clients": [
+                {
+                    "id": client_uuid
+                }
+            ],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": transport_type,
+            "security": "reality",
+            "realitySettings": {
+                "show": False,
+                "dest": dest_address,
+                "xver": 0,
+                "serverNames": [
+                    sni_domain
+                ],
+                "privateKey": private_key,
+                "minVersion": "",
+                "maxVersion": "",
+                "cipherSuites": "",
+                "shortIds": [
+                    short_id
+                ]
+            }
+        }
+    }
+    
+    # Configure fallbacks using strict integer dest as per standard VLESS config schema
+    if fallback_port:
+        inbound_config["settings"]["fallbacks"] = [
+            {
+                # Forward plain-text/malformed probes to local server returning standard HTTP 400 Bad Request
+                "dest": fallback_port
+            }
+        ]
+    else:
+        # Remote fallback
+        inbound_config["settings"]["fallbacks"] = [
+            {
+                "dest": f"{sni_domain}:80"
+            }
+        ]
+    
+    # Apply TCP Flow or xHTTP Settings
+    if transport_type == "tcp" and flow:
+        inbound_config["settings"]["clients"][0]["flow"] = flow
+    elif transport_type == "xhttp":
+        inbound_config["streamSettings"]["xhttpSettings"] = {
+            "path": xhttp_path,
+            "mode": xhttp_mode
+        }
+        
+    xray_config = {
+        "log": {
+            "loglevel": "warning"
+        },
+        "inbounds": [
+            inbound_config
+        ],
+        "outbounds": [
+            {
+                "protocol": "freedom"
+            }
+        ]
+    }
+    
+    # Ensure config folder exists
+    os.makedirs("/usr/local/etc/xray", exist_ok=True)
+    config_path = "/usr/local/etc/xray/config.json"
+    
+    with open(config_path, "w") as f:
+        json.dump(xray_config, f, indent=2)
+        
+    print_success(f"Config successfully written to {config_path}")
+    
+    # 9. Start and enable Xray Service via systemd
+    print_info("Starting and enabling Xray systemd service...")
+    run_cmd("systemctl daemon-reload")
+    run_cmd("systemctl enable xray")
+    run_cmd("systemctl restart xray")
+    
+    # Verify service is running
+    status = run_cmd("systemctl is-active xray", check=False)
+    if status != "active":
+        print_warning("Xray service is not active. Checking logs...")
+        logs = run_cmd("journalctl -u xray --no-pager -n 10", check=False)
+        print(logs)
+        print_error("Failed to start Xray. Please inspect logs above.")
+        return
+
+    print_success("Xray service started and enabled successfully!")
+    
+    # 10. Generate final client VLESS Link
+    query_params = {
+        "flow": flow,
+        "type": transport_type,
+        "host": "",
+        "path": xhttp_path if transport_type == "xhttp" else "",
+        "mode": xhttp_mode if transport_type == "xhttp" else "",
+        "security": "reality",
+        "fp": "chrome",
+        "sni": sni_domain,
+        "pbk": public_key,
+        "sid": short_id
+    }
+    
+    # Format query string manually to keep order clean and nice
+    query_parts = []
+    for k, v in query_params.items():
+        query_parts.append(f"{k}={v}")
+    
+    query_str = "&".join(query_parts)
+    
+    # URL encode the hash name
+    link_hash = urllib.parse.quote(link_name)
+    vless_link = f"vless://{client_uuid}@{ip_addr}:{port}?{query_str}#{link_hash}"
+    
+    # 11. Display installation success and client link
+    print_header("VLESS REALITY INSTALLED SUCCESSFULLY")
+    print(f"{GREEN}{BOLD}Your client configuration details:{RESET}")
+    print(f"  • {BOLD}Protocol:{RESET} VLESS")
+    print(f"  • {BOLD}Transport:{RESET} {transport_type.upper()}")
+    if transport_type == "tcp" and flow:
+        print(f"  • {BOLD}Flow:{RESET} {flow}")
+    elif transport_type == "xhttp":
+        print(f"  • {BOLD}Path:{RESET} {xhttp_path}")
+        print(f"  • {BOLD}Mode:{RESET} {xhttp_mode}")
+    print(f"  • {BOLD}Port:{RESET} {port}")
+    print(f"  • {BOLD}SNI (Mask domain):{RESET} {sni_domain}")
+    print(f"  • {BOLD}Public Key:{RESET} {public_key}")
+    print(f"  • {BOLD}Short ID (sid):{RESET} {short_id}")
+    print(f"  • {BOLD}Client UUID:{RESET} {client_uuid}")
+    print(f"  • {BOLD}Location/Name:{RESET} {link_name}")
+    print("\n" + "="*80 + "\n")
+    print(f"{CYAN}{BOLD}Copy and import this link into Streisand, hApp, Hiddify, FoXray or v2rayNG:{RESET}")
+    print(f"\n{GREEN}{BOLD}{vless_link}{RESET}\n")
+    print("="*80 + "\n")
+
+# ----------------- UNINSTALL LOGIC -----------------
+
+def run_uninstall():
+    """Completely remove Xray-core, services, and configurations from the system."""
+    print_header("UNINSTALL PROXY SERVICES")
+    print_warning("This option will stop, disable, and completely remove Xray-core, its fallback helper, and all config files.")
+    confirm = input("Are you absolutely sure you want to proceed? (y/N): ").strip().lower()
+    if confirm != 'y':
+        print_info("Uninstallation cancelled.")
+        return
+        
+    print_info("Stopping and disabling Xray systemd service...")
+    run_cmd("systemctl stop xray", check=False)
+    run_cmd("systemctl disable xray", check=False)
+    
+    print_info("Stopping and disabling Xray HTTP fallback helper service...")
+    run_cmd("systemctl stop xray-fallback", check=False)
+    run_cmd("systemctl disable xray-fallback", check=False)
+    if os.path.exists("/etc/systemd/system/xray-fallback.service"):
+        try:
+            os.remove("/etc/systemd/system/xray-fallback.service")
+            print_info("Removed fallback service unit file.")
+        except Exception as e:
+            print_warning(f"Could not remove fallback service file: {e}")
+            
+    # Use official script removal flag if available, or do it manually
+    print_info("Running Xray official uninstaller script...")
+    run_cmd("bash -c \"$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ remove", check=False)
+    
+    # Manual deep cleaning to guarantee no residual files
+    print_info("Performing deep cleaning of remaining files...")
+    paths_to_remove = [
+        "/usr/local/etc/xray",
+        "/usr/local/share/xray",
+        "/var/log/xray",
+        "/etc/systemd/system/xray.service",
+        "/etc/systemd/system/xray.service.d"
+    ]
+    
+    for path in paths_to_remove:
+        if os.path.exists(path):
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+                print_info(f"Removed residual: {path}")
+            except Exception as e:
+                print_warning(f"Could not remove path {path}: {e}")
+                
+    # Also look for xray binary in standard paths just in case
+    for binary_path in ["/usr/local/bin/xray", "/usr/bin/xray"]:
+        if os.path.exists(binary_path):
+            try:
+                os.remove(binary_path)
+                print_info(f"Removed binary: {binary_path}")
+            except Exception as e:
+                print_warning(f"Could not remove binary {binary_path}: {e}")
+                
+    print_info("Reloading systemd daemon...")
+    run_cmd("systemctl daemon-reload", check=False)
+    
+    print_success("Proxy services have been completely uninstalled!")
+
+# ----------------- MAIN CLI MENU -----------------
+
+def main():
+    print(BANNER)
+    
+    # Pre-run system audits
+    check_root()
+    check_ubuntu()
+    
+    # Auto-detection
+    print_info("Auto-detecting Server Public IP and GeoIP location...")
+    public_ip = get_public_ip()
+    if not public_ip:
+        print_warning("Could not detect public IP address automatically.")
+        public_ip = "127.0.0.1"
+    else:
+        print_success(f"Detected Public IP: {public_ip}")
+        
+    geo_info = get_geoip_info(public_ip)
+    if geo_info:
+        flag = get_emoji_flag(geo_info.get("country_code"))
+        print_success(f"Detected Location: {flag} {geo_info.get('city') or ''}, {geo_info.get('country_name') or ''} (Provider: {geo_info.get('org') or 'Unknown'})")
+    else:
+        print_warning("Could not determine GeoIP details automatically.")
+    
+    while True:
+        print("\n" + "="*50)
+        print(f"{BOLD}MAIN MENU:{RESET}")
+        print(f"  1) {BOLD}{GREEN}Install / Reconfigure VLESS Reality{RESET} (TCP-Vision / xHTTP)")
+        print(f"  2) {BOLD}{RED}Uninstall all proxy services{RESET}")
+        print(f"  3) Exit")
+        print("="*50)
+        
+        choice = input(f"{BOLD}Choose option [1-3]: {RESET}").strip()
+        
+        if choice == '1':
+            setup_vless_reality(public_ip, geo_info)
+        elif choice == '2':
+            run_uninstall()
+        elif choice == '3':
+            print("\nGoodbye!\n")
+            break
+        else:
+            print_error("Invalid option. Please enter 1, 2, or 3.")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nScript interrupted by user. Exiting.")
+        sys.exit(0)
