@@ -467,6 +467,15 @@ WantedBy=multi-user.target
     with open(config_path, "w") as f:
         json.dump(xray_config, f, indent=2)
         
+    # Cache public key and link name for retrieval later
+    try:
+        with open("/usr/local/etc/xray/public_key.txt", "w") as f:
+            f.write(public_key)
+        with open("/usr/local/etc/xray/link_name.txt", "w") as f:
+            f.write(link_name)
+    except Exception as e:
+        print_warning(f"Could not cache public key or link name: {e}")
+        
     print_success(f"Config successfully written to {config_path}")
     
     # 9. Start and enable Xray Service via systemd
@@ -500,6 +509,9 @@ WantedBy=multi-user.target
         "sid": short_id
     }
     
+    if transport_type == "tcp":
+        query_params["headerType"] = "none"
+        
     # Format query string manually to keep order clean and nice
     query_parts = []
     for k, v in query_params.items():
@@ -524,6 +536,141 @@ WantedBy=multi-user.target
     print(f"  • {BOLD}Port:{RESET} {port}")
     print(f"  • {BOLD}SNI (Mask domain):{RESET} {sni_domain}")
     print(f"  • {BOLD}Public Key:{RESET} {public_key}")
+    print(f"  • {BOLD}Short ID (sid):{RESET} {short_id}")
+    print(f"  • {BOLD}Client UUID:{RESET} {client_uuid}")
+    print(f"  • {BOLD}Location/Name:{RESET} {link_name}")
+    print("\n" + "="*80 + "\n")
+    print(f"{CYAN}{BOLD}Copy and import this link into Streisand, hApp, Hiddify, FoXray or v2rayNG:{RESET}")
+    print(f"\n{GREEN}{BOLD}{vless_link}{RESET}\n")
+    print("="*80 + "\n")
+
+# ----------------- URL RETRIEVAL LOGIC -----------------
+
+def show_active_connection_url(public_ip):
+    """Retrieve and display the currently active VLESS Reality connection URL."""
+    print_header("Active Proxy Connection Details")
+    
+    config_path = "/usr/local/etc/xray/config.json"
+    if not os.path.exists(config_path):
+        print_error("No active Xray configuration found. Please run Option 1 first to install.")
+        return
+        
+    try:
+        with open(config_path, "r") as f:
+            xray_config = json.load(f)
+    except Exception as e:
+        print_error(f"Failed to read or parse Xray config: {e}")
+        return
+        
+    # Check if we have inbounds
+    inbounds = xray_config.get("inbounds", [])
+    if not inbounds:
+        print_error("Configuration has no inbounds defined.")
+        return
+        
+    inbound = inbounds[0]
+    protocol = inbound.get("protocol")
+    if protocol != "vless":
+        print_error(f"Active protocol '{protocol}' is not supported for URL retrieval.")
+        return
+        
+    # Extract settings
+    settings = inbound.get("settings", {})
+    clients = settings.get("clients", [])
+    if not clients:
+        print_error("No clients configured in the active inbound.")
+        return
+        
+    client_uuid = clients[0].get("id")
+    flow = clients[0].get("flow", "")
+    port = inbound.get("port")
+    
+    stream_settings = inbound.get("streamSettings", {})
+    transport_type = stream_settings.get("network", "tcp")
+    reality_settings = stream_settings.get("realitySettings", {})
+    
+    sni_domain = reality_settings.get("serverNames", ["images.apple.com"])[0]
+    short_id = reality_settings.get("shortIds", [""])[0]
+    
+    xhttp_path = ""
+    xhttp_mode = ""
+    if transport_type == "xhttp":
+        xhttp_settings = stream_settings.get("xhttpSettings", {})
+        xhttp_path = xhttp_settings.get("path", "")
+        xhttp_mode = xhttp_settings.get("mode", "")
+        
+    # Try to load cached public key
+    public_key = ""
+    pubkey_path = "/usr/local/etc/xray/public_key.txt"
+    if os.path.exists(pubkey_path):
+        try:
+            with open(pubkey_path, "r") as f:
+                public_key = f.read().strip()
+        except Exception:
+            pass
+            
+    if not public_key:
+        print_warning("Cryptographic public key (pbk) was not found in the local cache.")
+        print_info("To fully restore/regenerate the key and URL, please run Option 1 (Reconfigure).")
+        # Prompt user if they want to manually paste it or view without it
+        provide_key = input("If you have the public key, enter it now (or press Enter to skip): ").strip()
+        if provide_key:
+            public_key = provide_key
+        else:
+            public_key = "MISSING_PUBLIC_KEY"
+            
+    # Try to load cached link name
+    link_name = ""
+    linkname_path = "/usr/local/etc/xray/link_name.txt"
+    if os.path.exists(linkname_path):
+        try:
+            with open(linkname_path, "r") as f:
+                link_name = f.read().strip()
+        except Exception:
+            pass
+            
+    if not link_name:
+        link_name = "🌐(AWS) Server"
+        
+    # Reconstruct VLESS Link
+    query_params = {
+        "flow": flow,
+        "type": transport_type,
+        "host": "",
+        "path": xhttp_path if transport_type == "xhttp" else "",
+        "mode": xhttp_mode if transport_type == "xhttp" else "",
+        "security": "reality",
+        "fp": "chrome",
+        "sni": sni_domain,
+        "pbk": public_key,
+        "sid": short_id
+    }
+    
+    if transport_type == "tcp":
+        query_params["headerType"] = "none"
+        
+    # Format query string manually to keep order clean and nice
+    query_parts = []
+    for k, v in query_params.items():
+        query_parts.append(f"{k}={v}")
+    query_str = "&".join(query_parts)
+    
+    # URL encode the hash name
+    link_hash = urllib.parse.quote(link_name)
+    vless_link = f"vless://{client_uuid}@{public_ip}:{port}?{query_str}#{link_hash}"
+    
+    # Display details
+    print_success("Active connection configuration successfully reconstructed!")
+    print(f"  • {BOLD}Protocol:{RESET} VLESS")
+    print(f"  • {BOLD}Transport:{RESET} {transport_type.upper()}")
+    if transport_type == "tcp" and flow:
+        print(f"  • {BOLD}Flow:{RESET} {flow}")
+    elif transport_type == "xhttp":
+        print(f"  • {BOLD}Path:{RESET} {xhttp_path}")
+        print(f"  • {BOLD}Mode:{RESET} {xhttp_mode}")
+    print(f"  • {BOLD}Port:{RESET} {port}")
+    print(f"  • {BOLD}SNI (Mask domain):{RESET} {sni_domain}")
+    print(f"  • {BOLD}Public Key (pbk):{RESET} {public_key}")
     print(f"  • {BOLD}Short ID (sid):{RESET} {short_id}")
     print(f"  • {BOLD}Client UUID:{RESET} {client_uuid}")
     print(f"  • {BOLD}Location/Name:{RESET} {link_name}")
@@ -625,21 +772,24 @@ def main():
         print("\n" + "="*50)
         print(f"{BOLD}MAIN MENU:{RESET}")
         print(f"  1) {BOLD}{GREEN}Install / Reconfigure VLESS Reality{RESET} (TCP-Vision / xHTTP)")
-        print(f"  2) {BOLD}{RED}Uninstall all proxy services{RESET}")
-        print(f"  3) Exit")
+        print(f"  2) {BOLD}{CYAN}Show active connection URL{RESET}")
+        print(f"  3) {BOLD}{RED}Uninstall all proxy services{RESET}")
+        print(f"  4) Exit")
         print("="*50)
         
-        choice = input(f"{BOLD}Choose option [1-3]: {RESET}").strip()
+        choice = input(f"{BOLD}Choose option [1-4]: {RESET}").strip()
         
         if choice == '1':
             setup_vless_reality(public_ip, geo_info)
         elif choice == '2':
-            run_uninstall()
+            show_active_connection_url(public_ip)
         elif choice == '3':
+            run_uninstall()
+        elif choice == '4':
             print("\nGoodbye!\n")
             break
         else:
-            print_error("Invalid option. Please enter 1, 2, or 3.")
+            print_error("Invalid option. Please enter 1, 2, 3, or 4.")
 
 if __name__ == "__main__":
     try:
