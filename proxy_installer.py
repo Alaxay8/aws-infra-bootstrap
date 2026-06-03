@@ -17,6 +17,7 @@ import urllib.request
 import urllib.parse
 import subprocess
 import shutil
+import base64
 
 # ANSI Color Codes for Premium Terminal UI
 GREEN = "\033[92m"
@@ -51,6 +52,73 @@ def print_warning(msg):
 
 def print_error(msg):
     print(f"{RED}{BOLD}[✘] {msg}{RESET}")
+
+# ----------------- CRYPTOGRAPHIC HELPERS -----------------
+# Curve25519 (X25519) prime field and constants
+P_FIELD = 2**255 - 19
+A24 = 121665
+
+def curve25519_cswap(swap, x_2, x_3):
+    """Constant-time swap helper for Montgomery ladder."""
+    dummy = swap * ((x_2 - x_3) % P_FIELD)
+    x_2 = (x_2 - dummy) % P_FIELD
+    x_3 = (x_3 + dummy) % P_FIELD
+    return x_2, x_3
+
+def curve25519_eval(k, u=9):
+    """Montgomery ladder for scalar multiplication on Curve25519 (RFC 7748)."""
+    x_1 = u
+    x_2 = 1
+    z_2 = 0
+    x_3 = u
+    z_3 = 1
+    swap = 0
+    for t in reversed(range(255)):
+        k_t = (k >> t) & 1
+        swap ^= k_t
+        x_2, x_3 = curve25519_cswap(swap, x_2, x_3)
+        z_2, z_3 = curve25519_cswap(swap, z_2, z_3)
+        swap = k_t
+        
+        A = (x_2 + z_2) % P_FIELD
+        AA = (A * A) % P_FIELD
+        B = (x_2 - z_2) % P_FIELD
+        BB = (B * B) % P_FIELD
+        E = (AA - BB) % P_FIELD
+        C = (x_3 + z_3) % P_FIELD
+        D = (x_3 - z_3) % P_FIELD
+        DA = (D * A) % P_FIELD
+        CB = (C * B) % P_FIELD
+        
+        x_3 = ((DA + CB) ** 2) % P_FIELD
+        z_3 = (x_1 * (DA - CB) ** 2) % P_FIELD
+        x_2 = (AA * BB) % P_FIELD
+        z_2 = (E * (AA + A24 * E)) % P_FIELD
+        
+    x_2, x_3 = curve25519_cswap(swap, x_2, x_3)
+    z_2, z_3 = curve25519_cswap(swap, z_2, z_3)
+    return (x_2 * pow(z_2, P_FIELD - 2, P_FIELD)) % P_FIELD
+
+def get_public_key_from_private(private_key_b64):
+    """Derive X25519 public key from a base64url-encoded private key."""
+    # Handle padding
+    missing_padding = len(private_key_b64) % 4
+    if missing_padding:
+        private_key_b64 += '=' * (4 - missing_padding)
+        
+    priv_bytes = bytearray(base64.urlsafe_b64decode(private_key_b64))
+    
+    # Clamp private key as per RFC 7748
+    priv_bytes[0] &= 248
+    priv_bytes[31] &= 127
+    priv_bytes[31] |= 64
+    
+    scalar = int.from_bytes(priv_bytes, 'little')
+    pub_u = curve25519_eval(scalar, 9)
+    pub_bytes = pub_u.to_bytes(32, 'little')
+    
+    pub_b64 = base64.urlsafe_b64encode(pub_bytes).decode('utf-8')
+    return pub_b64.rstrip('=')
 
 # ----------------- SYSTEM CHECKS -----------------
 
@@ -599,7 +667,7 @@ def show_active_connection_url(public_ip):
         xhttp_path = xhttp_settings.get("path", "")
         xhttp_mode = xhttp_settings.get("mode", "")
         
-    # Try to load cached public key
+    # Try to load cached public key, or derive it from the private key in config.json!
     public_key = ""
     pubkey_path = "/usr/local/etc/xray/public_key.txt"
     if os.path.exists(pubkey_path):
@@ -609,10 +677,23 @@ def show_active_connection_url(public_ip):
         except Exception:
             pass
             
+    # If not in cache, mathematically derive it from the private key in config.json!
     if not public_key:
-        print_warning("Cryptographic public key (pbk) was not found in the local cache.")
-        print_info("To fully restore/regenerate the key and URL, please run Option 1 (Reconfigure).")
-        # Prompt user if they want to manually paste it or view without it
+        private_key = reality_settings.get("privateKey", "")
+        if private_key:
+            try:
+                public_key = get_public_key_from_private(private_key)
+                # Cache it for next time
+                try:
+                    with open(pubkey_path, "w") as f:
+                        f.write(public_key)
+                except Exception:
+                    pass
+            except Exception as e:
+                print_warning(f"Could not derive public key from private key: {e}")
+                
+    if not public_key:
+        print_warning("Cryptographic public key (pbk) was not found in the local cache and could not be derived.")
         provide_key = input("If you have the public key, enter it now (or press Enter to skip): ").strip()
         if provide_key:
             public_key = provide_key
