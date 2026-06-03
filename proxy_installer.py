@@ -384,7 +384,7 @@ def setup_vless_reality(public_ip, geo_info):
             # Fallback to first few words
             org_clean = " ".join(org.split()[:2])
 
-    default_link_name = f"{flag}({org_clean}) {city}"
+    default_link_name = f"{flag} ({org_clean}) {city}"
     link_name = input(f"{BOLD}Enter Location / Name for connection link [{default_link_name}]: {RESET}").strip()
     if not link_name:
         link_name = default_link_name
@@ -711,7 +711,38 @@ def show_active_connection_url(public_ip):
             pass
             
     if not link_name:
-        link_name = "🌐(AWS) Server"
+        # Dynamically detect GeoIP location if cache is missing!
+        geo_info = get_geoip_info(public_ip)
+        if geo_info:
+            flag = get_emoji_flag(geo_info.get("country_code"))
+            city = geo_info.get("city") or "Server"
+            org = geo_info.get("org") or ""
+            org_clean = "Server"
+            if org:
+                org_lower = org.lower()
+                if "amazon" in org_lower or "aws" in org_lower:
+                    org_clean = "AWS"
+                elif "digitalocean" in org_lower:
+                    org_clean = "DigitalOcean"
+                elif "hetzner" in org_lower:
+                    org_clean = "Hetzner"
+                elif "linode" in org_lower or "akamai" in org_lower:
+                    org_clean = "Linode"
+                elif "google" in org_lower or "gcp" in org_lower:
+                    org_clean = "GCP"
+                elif "cloudflare" in org_lower:
+                    org_clean = "Cloudflare"
+                else:
+                    org_clean = " ".join(org.split()[:2])
+            link_name = f"{flag} ({org_clean}) {city}"
+            # Cache it for next time
+            try:
+                with open(linkname_path, "w") as f:
+                    f.write(link_name)
+            except Exception:
+                pass
+        else:
+            link_name = "🌐 (AWS) Server"
         
     # Reconstruct VLESS Link
     query_params = {
