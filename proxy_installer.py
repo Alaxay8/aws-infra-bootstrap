@@ -884,7 +884,7 @@ def setup_hysteria2(public_ip, geo_info):
     run_cmd("apt-get update && apt-get install -y curl openssl")
 
     print_info("Downloading and installing/updating Hysteria 2 via official script...")
-    run_cmd("bash -c \"$(curl -fsSL https://get.hy2.dev/)\"")
+    run_cmd("curl -fsSL https://get.hy2.sh/ | bash")
     
     # 7. Generate self-signed TLS certificate
     print_info("Generating self-signed certificate for Hysteria 2...")
