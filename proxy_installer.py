@@ -1010,7 +1010,7 @@ masquerade:
     link_hash = urllib.parse.quote(link_name)
     cert_sha256 = get_cert_sha256(cert_path)
     if cert_sha256:
-        hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?pinSHA256={cert_sha256}&sni={sni_domain}#{link_hash}"
+        hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?insecure=1&pinSHA256={cert_sha256}&sni={sni_domain}#{link_hash}"
     else:
         hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
     
@@ -1159,7 +1159,7 @@ def show_hysteria2_url(public_ip):
 
     link_hash = urllib.parse.quote(link_name)
     if sha256_hash:
-        hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?pinSHA256={sha256_hash}&sni={sni_domain}#{link_hash}"
+        hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?insecure=1&pinSHA256={sha256_hash}&sni={sni_domain}#{link_hash}"
     else:
         hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
     
