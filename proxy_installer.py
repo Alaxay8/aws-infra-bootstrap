@@ -34,7 +34,7 @@ RESET = "\033[0m"
 BANNER = f"""
 {CYAN}{BOLD}┌──────────────────────────────────────────────────────────┐
 │             MODERN PROXY INSTALLER & MANAGER             │
-│            Powered by Xray-core & Reality Protocol       │
+│        Xray VLESS Reality (TCP/xHTTP) & Hysteria 2       │
 └──────────────────────────────────────────────────────────┘{RESET}
 """
 
@@ -204,6 +204,15 @@ def is_port_in_use(port):
     """Check if the specified TCP port is already in use on the host."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(('0.0.0.0', int(port)))
+            return False
+    except socket.error:
+        return True
+
+def is_udp_port_in_use(port):
+    """Check if the specified UDP port is already in use on the host."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.bind(('0.0.0.0', int(port)))
             return False
     except socket.error:
@@ -791,12 +800,306 @@ def show_active_connection_url(public_ip):
     print(f"\n{GREEN}{BOLD}{vless_link}{RESET}\n")
     print("="*80 + "\n")
 
+# ----------------- HYSTERIA 2 LOGIC -----------------
+
+def setup_hysteria2(public_ip, geo_info):
+    """Interactive wizard to configure Hysteria 2 (UDP) and start hysteria-server."""
+    print_header("Hysteria 2 Configuration Wizard")
+    
+    # 1. IP Address confirmation
+    ip_addr_input = input(f"{BOLD}Confirm your Server Public IP [{public_ip}]: {RESET}").strip()
+    if not ip_addr_input or ip_addr_input.lower() in ["y", "yes", "ok"]:
+        ip_addr = public_ip
+    else:
+        ip_addr = ip_addr_input
+    
+    # 2. Port choice
+    default_port = 443
+    while True:
+        port_input = input(f"{BOLD}Enter UDP Port for Hysteria 2 [{default_port}]: {RESET}").strip()
+        if not port_input:
+            port = default_port
+        else:
+            try:
+                port = int(port_input)
+                if not (1 <= port <= 65535):
+                    raise ValueError
+            except ValueError:
+                print_error("Invalid port number. Must be between 1 and 65535.")
+                continue
+        
+        if is_udp_port_in_use(port):
+            print_warning(f"UDP Port {port} seems to be in use by another process.")
+            override = input(f"Do you want to use port {port} anyway? (y/N): ").strip().lower()
+            if override != 'y':
+                continue
+        break
+    
+    # 3. SNI choice
+    default_sni = "images.apple.com"
+    print_info("Hysteria 2 requires a domain/SNI for TLS and masquerading. Good options: images.apple.com, dl.google.com, apple.com")
+    sni_domain = input(f"{BOLD}Enter SNI Domain [{default_sni}]: {RESET}").strip()
+    if not sni_domain:
+        sni_domain = default_sni
+        
+    masquerade_url = f"https://{sni_domain}"
+    
+    # 4. Password choice
+    default_password = os.urandom(8).hex()  # 16 characters
+    password = input(f"{BOLD}Enter password for Hysteria 2 [{default_password}]: {RESET}").strip()
+    if not password:
+        password = default_password
+        
+    # 5. Nice Name / Location for Link
+    flag = get_emoji_flag(geo_info.get("country_code"))
+    city = geo_info.get("city") or "Server"
+    org = geo_info.get("org") or ""
+    # Simplify organization name (e.g. AWS, DigitalOcean, etc.)
+    org_clean = "Server"
+    if org:
+        org_lower = org.lower()
+        if "amazon" in org_lower or "aws" in org_lower:
+            org_clean = "AWS"
+        elif "digitalocean" in org_lower:
+            org_clean = "DigitalOcean"
+        elif "hetzner" in org_lower:
+            org_clean = "Hetzner"
+        elif "linode" in org_lower or "akamai" in org_lower:
+            org_clean = "Linode"
+        elif "google" in org_lower or "gcp" in org_lower:
+            org_clean = "GCP"
+        elif "cloudflare" in org_lower:
+            org_clean = "Cloudflare"
+        else:
+            # Fallback to first few words
+            org_clean = " ".join(org.split()[:2])
+
+    default_link_name = f"{flag} ({org_clean}) {city}"
+    link_name = input(f"{BOLD}Enter Location / Name for connection link [{default_link_name}]: {RESET}").strip()
+    if not link_name:
+        link_name = default_link_name
+
+    # 6. Install Hysteria 2 via official script
+    print_info("Installing pre-requisites (curl, openssl)...")
+    run_cmd("apt-get update && apt-get install -y curl openssl")
+
+    print_info("Downloading and installing/updating Hysteria 2 via official script...")
+    run_cmd("bash -c \"$(curl -fsSL https://get.hy2.dev/)\"")
+    
+    # 7. Generate self-signed TLS certificate
+    print_info("Generating self-signed certificate for Hysteria 2...")
+    os.makedirs("/etc/hysteria", exist_ok=True)
+    cert_path = "/etc/hysteria/server.crt"
+    key_path = "/etc/hysteria/server.key"
+    run_cmd(f'openssl req -x509 -nodes -newkey rsa:2048 -keyout {key_path} -out {cert_path} -subj "/CN={sni_domain}" -days 36500')
+    
+    os.chmod(key_path, 0o600)
+    os.chmod(cert_path, 0o644)
+    
+    # 8. Build Hysteria 2 config.yaml
+    print_info("Building Hysteria 2 configuration file...")
+    config_yaml = f"""# Hysteria 2 Server Configuration
+listen: :{port}
+
+tls:
+  cert: {cert_path}
+  key: {key_path}
+
+auth:
+  type: password
+  password: {password}
+
+masquerade:
+  type: proxy
+  proxy:
+    url: {masquerade_url}
+    rewriteHost: true
+"""
+    config_yaml_path = "/etc/hysteria/config.yaml"
+    with open(config_yaml_path, "w") as f:
+        f.write(config_yaml)
+        
+    # Cache metadata
+    try:
+        with open("/etc/hysteria/password.txt", "w") as f:
+            f.write(password)
+        with open("/etc/hysteria/port.txt", "w") as f:
+            f.write(str(port))
+        with open("/etc/hysteria/sni.txt", "w") as f:
+            f.write(sni_domain)
+        with open("/etc/hysteria/link_name.txt", "w") as f:
+            f.write(link_name)
+    except Exception as e:
+        print_warning(f"Could not cache Hysteria 2 metadata: {e}")
+        
+    print_success(f"Configuration successfully written to {config_yaml_path}")
+    
+    # 9. Start and enable systemd service
+    print_info("Starting and enabling Hysteria 2 systemd service...")
+    run_cmd("systemctl daemon-reload")
+    run_cmd("systemctl enable hysteria-server")
+    run_cmd("systemctl restart hysteria-server")
+    
+    # Verify service
+    status = run_cmd("systemctl is-active hysteria-server", check=False)
+    if status != "active":
+        print_warning("Hysteria 2 service is not active. Checking logs...")
+        logs = run_cmd("journalctl -u hysteria-server --no-pager -n 10", check=False)
+        print(logs)
+        print_error("Failed to start Hysteria 2. Please inspect logs above.")
+        return
+        
+    print_success("Hysteria 2 service started and enabled successfully!")
+    
+    # 10. Generate client URI
+    link_hash = urllib.parse.quote(link_name)
+    hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
+    
+    # 11. Display success details
+    print_header("HYSTERIA 2 INSTALLED SUCCESSFULLY")
+    print(f"{GREEN}{BOLD}Your client configuration details:{RESET}")
+    print(f"  • {BOLD}Protocol:{RESET} Hysteria 2")
+    print(f"  • {BOLD}Port (UDP):{RESET} {port}")
+    print(f"  • {BOLD}SNI (Mask domain):{RESET} {sni_domain}")
+    print(f"  • {BOLD}Password:{RESET} {password}")
+    print(f"  • {BOLD}Location/Name:{RESET} {link_name}")
+    print("\n" + "="*80 + "\n")
+    print(f"{CYAN}{BOLD}Copy and import this link into Nekobox, Hiddify, Streisand or FoXray:{RESET}")
+    print(f"\n{GREEN}{BOLD}{hysteria_link}{RESET}\n")
+    print("="*80 + "\n")
+
+
+def show_hysteria2_url(public_ip):
+    """Retrieve and display the currently active Hysteria 2 connection URL."""
+    print_header("Active Hysteria 2 Connection Details")
+    
+    config_path = "/etc/hysteria/config.yaml"
+    if not os.path.exists(config_path):
+        print_error("No active Hysteria 2 configuration found. Please run Option 2 to install.")
+        return
+        
+    password = ""
+    port = ""
+    sni_domain = ""
+    link_name = ""
+    
+    password_path = "/etc/hysteria/password.txt"
+    port_path = "/etc/hysteria/port.txt"
+    sni_path = "/etc/hysteria/sni.txt"
+    linkname_path = "/etc/hysteria/link_name.txt"
+    
+    if os.path.exists(password_path):
+        try:
+            with open(password_path, "r") as f:
+                password = f.read().strip()
+        except Exception:
+            pass
+            
+    if os.path.exists(port_path):
+        try:
+            with open(port_path, "r") as f:
+                port = f.read().strip()
+        except Exception:
+            pass
+            
+    if os.path.exists(sni_path):
+        try:
+            with open(sni_path, "r") as f:
+                sni_domain = f.read().strip()
+        except Exception:
+            pass
+            
+    if os.path.exists(linkname_path):
+        try:
+            with open(linkname_path, "r") as f:
+                link_name = f.read().strip()
+        except Exception:
+            pass
+
+    # Fallback to regex parsing of config.yaml if cache is incomplete
+    if not password or not port or not sni_domain:
+        try:
+            with open(config_path, "r") as f:
+                yaml_content = f.read()
+                
+            if not port:
+                port_match = re.search(r"listen:\s*(?:[^:\n]*:)?(\d+)", yaml_content)
+                if port_match:
+                    port = port_match.group(1).strip()
+                    
+            if not password:
+                pass_match = re.search(r"password:\s*['\"]?([^'\"\s#]+)['\"]?", yaml_content)
+                if pass_match:
+                    password = pass_match.group(1).strip()
+                    
+            if not sni_domain:
+                url_match = re.search(r"url:\s*['\"]?https?://([^/'\"\s#]+)", yaml_content)
+                if url_match:
+                    sni_domain = url_match.group(1).strip()
+        except Exception as e:
+            print_error(f"Failed to read or parse Hysteria 2 config: {e}")
+            return
+
+    if not port:
+        port = "443"
+    if not password:
+        print_error("Could not find Hysteria 2 password in configuration.")
+        return
+    if not sni_domain:
+        sni_domain = "images.apple.com"
+
+    if not link_name:
+        geo_info = get_geoip_info(public_ip)
+        if geo_info:
+            flag = get_emoji_flag(geo_info.get("country_code"))
+            city = geo_info.get("city") or "Server"
+            org = geo_info.get("org") or ""
+            org_clean = "Server"
+            if org:
+                org_lower = org.lower()
+                if "amazon" in org_lower or "aws" in org_lower:
+                    org_clean = "AWS"
+                elif "digitalocean" in org_lower:
+                    org_clean = "DigitalOcean"
+                elif "hetzner" in org_lower:
+                    org_clean = "Hetzner"
+                elif "linode" in org_lower or "akamai" in org_lower:
+                    org_clean = "Linode"
+                elif "google" in org_lower or "gcp" in org_lower:
+                    org_clean = "GCP"
+                elif "cloudflare" in org_lower:
+                    org_clean = "Cloudflare"
+                else:
+                    org_clean = " ".join(org.split()[:2])
+            link_name = f"{flag} ({org_clean}) {city}"
+            try:
+                with open(linkname_path, "w") as f:
+                    f.write(link_name)
+            except Exception:
+                pass
+        else:
+            link_name = "🌐 (AWS) Server"
+
+    link_hash = urllib.parse.quote(link_name)
+    hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
+    
+    print_success("Active Hysteria 2 configuration successfully reconstructed!")
+    print(f"  • {BOLD}Protocol:{RESET} Hysteria 2")
+    print(f"  • {BOLD}Port (UDP):{RESET} {port}")
+    print(f"  • {BOLD}SNI (Mask domain):{RESET} {sni_domain}")
+    print(f"  • {BOLD}Password:{RESET} {password}")
+    print(f"  • {BOLD}Location/Name:{RESET} {link_name}")
+    print("\n" + "="*80 + "\n")
+    print(f"{CYAN}{BOLD}Copy and import this link into Nekobox, Hiddify, Streisand or FoXray:{RESET}")
+    print(f"\n{GREEN}{BOLD}{hysteria_link}{RESET}\n")
+    print("="*80 + "\n")
+
 # ----------------- UNINSTALL LOGIC -----------------
 
 def run_uninstall():
-    """Completely remove Xray-core, services, and configurations from the system."""
+    """Completely remove Xray-core, Hysteria 2, services, and configurations from the system."""
     print_header("UNINSTALL PROXY SERVICES")
-    print_warning("This option will stop, disable, and completely remove Xray-core, its fallback helper, and all config files.")
+    print_warning("This option will stop, disable, and completely remove Xray-core, Hysteria 2, fallback helpers, and all configuration/certificate files.")
     confirm = input("Are you absolutely sure you want to proceed? (y/N): ").strip().lower()
     if confirm != 'y':
         print_info("Uninstallation cancelled.")
@@ -816,6 +1119,10 @@ def run_uninstall():
         except Exception as e:
             print_warning(f"Could not remove fallback service file: {e}")
             
+    print_info("Stopping and disabling Hysteria 2 systemd service...")
+    run_cmd("systemctl stop hysteria-server", check=False)
+    run_cmd("systemctl disable hysteria-server", check=False)
+    
     # Use official script removal flag if available, or do it manually
     print_info("Running Xray official uninstaller script...")
     run_cmd("bash -c \"$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)\" @ remove", check=False)
@@ -827,7 +1134,8 @@ def run_uninstall():
         "/usr/local/share/xray",
         "/var/log/xray",
         "/etc/systemd/system/xray.service",
-        "/etc/systemd/system/xray.service.d"
+        "/etc/systemd/system/xray.service.d",
+        "/etc/hysteria"
     ]
     
     for path in paths_to_remove:
@@ -841,14 +1149,23 @@ def run_uninstall():
             except Exception as e:
                 print_warning(f"Could not remove path {path}: {e}")
                 
-    # Also look for xray binary in standard paths just in case
-    for binary_path in ["/usr/local/bin/xray", "/usr/bin/xray"]:
+    # Also look for xray and hysteria binaries in standard paths just in case
+    for binary_path in ["/usr/local/bin/xray", "/usr/bin/xray", "/usr/local/bin/hysteria", "/usr/bin/hysteria"]:
         if os.path.exists(binary_path):
             try:
                 os.remove(binary_path)
                 print_info(f"Removed binary: {binary_path}")
             except Exception as e:
                 print_warning(f"Could not remove binary {binary_path}: {e}")
+                
+    # Remove Hysteria service files if they exist
+    for svc_path in ["/etc/systemd/system/hysteria-server.service", "/lib/systemd/system/hysteria-server.service"]:
+        if os.path.exists(svc_path):
+            try:
+                os.remove(svc_path)
+                print_info(f"Removed Hysteria service unit file: {svc_path}")
+            except Exception as e:
+                print_warning(f"Could not remove Hysteria service unit file: {svc_path}")
                 
     print_info("Reloading systemd daemon...")
     run_cmd("systemctl daemon-reload", check=False)
@@ -884,24 +1201,30 @@ def main():
         print("\n" + "="*50)
         print(f"{BOLD}MAIN MENU:{RESET}")
         print(f"  1) {BOLD}{GREEN}Install / Reconfigure VLESS Reality{RESET} (TCP-Vision / xHTTP)")
-        print(f"  2) {BOLD}{CYAN}Show active connection URL{RESET}")
-        print(f"  3) {BOLD}{RED}Uninstall all proxy services{RESET}")
-        print(f"  4) Exit")
+        print(f"  2) {BOLD}{GREEN}Install / Reconfigure Hysteria 2{RESET} (UDP)")
+        print(f"  3) {BOLD}{CYAN}Show active VLESS Reality URL{RESET}")
+        print(f"  4) {BOLD}{CYAN}Show active Hysteria 2 URL{RESET}")
+        print(f"  5) {BOLD}{RED}Uninstall all proxy services{RESET}")
+        print(f"  6) Exit")
         print("="*50)
         
-        choice = input(f"{BOLD}Choose option [1-4]: {RESET}").strip()
+        choice = input(f"{BOLD}Choose option [1-6]: {RESET}").strip()
         
         if choice == '1':
             setup_vless_reality(public_ip, geo_info)
         elif choice == '2':
-            show_active_connection_url(public_ip)
+            setup_hysteria2(public_ip, geo_info)
         elif choice == '3':
-            run_uninstall()
+            show_active_connection_url(public_ip)
         elif choice == '4':
+            show_hysteria2_url(public_ip)
+        elif choice == '5':
+            run_uninstall()
+        elif choice == '6':
             print("\nGoodbye!\n")
             break
         else:
-            print_error("Invalid option. Please enter 1, 2, 3, or 4.")
+            print_error("Invalid option. Please enter a number from 1 to 6.")
 
 if __name__ == "__main__":
     try:
