@@ -186,6 +186,21 @@ def get_emoji_flag(country_code):
         return "🌐"
     return "".join(chr(127397 + ord(c)) for c in country_code.upper())
 
+def get_cert_sha256(cert_path):
+    """Calculate the SHA-256 fingerprint of a PEM certificate without colons, in lowercase."""
+    try:
+        with open(cert_path, "r") as f:
+            content = f.read()
+        lines = content.splitlines()
+        b64_lines = [line.strip() for line in lines if line.strip() and not line.startswith("-----")]
+        b64_data = "".join(b64_lines)
+        der_data = base64.b64decode(b64_data)
+        import hashlib
+        h = hashlib.sha256(der_data).hexdigest().lower()
+        return h
+    except Exception:
+        return ""
+
 # ----------------- UTILITY FUNCTIONS -----------------
 
 def run_cmd(cmd, check=True):
@@ -944,6 +959,11 @@ masquerade:
             f.write(sni_domain)
         with open("/etc/hysteria/link_name.txt", "w") as f:
             f.write(link_name)
+            
+        cert_sha256 = get_cert_sha256(cert_path)
+        if cert_sha256:
+            with open("/etc/hysteria/sha256.txt", "w") as f:
+                f.write(cert_sha256)
     except Exception as e:
         print_warning(f"Could not cache Hysteria 2 metadata: {e}")
         
@@ -968,7 +988,11 @@ masquerade:
     
     # 10. Generate client URI
     link_hash = urllib.parse.quote(link_name)
-    hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
+    cert_sha256 = get_cert_sha256(cert_path)
+    if cert_sha256:
+        hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?pinSHA256={cert_sha256}&sni={sni_domain}#{link_hash}"
+    else:
+        hysteria_link = f"hysteria2://{password}@{ip_addr}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
     
     # 11. Display success details
     print_header("HYSTERIA 2 INSTALLED SUCCESSFULLY")
@@ -1095,8 +1119,29 @@ def show_hysteria2_url(public_ip):
         else:
             link_name = "🌐 (AWS) Server"
 
+    sha256_hash = ""
+    sha256_path = "/etc/hysteria/sha256.txt"
+    if os.path.exists(sha256_path):
+        try:
+            with open(sha256_path, "r") as f:
+                sha256_hash = f.read().strip()
+        except Exception:
+            pass
+            
+    if not sha256_hash and os.path.exists("/etc/hysteria/server.crt"):
+        sha256_hash = get_cert_sha256("/etc/hysteria/server.crt")
+        if sha256_hash:
+            try:
+                with open(sha256_path, "w") as f:
+                    f.write(sha256_hash)
+            except Exception:
+                pass
+
     link_hash = urllib.parse.quote(link_name)
-    hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
+    if sha256_hash:
+        hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?pinSHA256={sha256_hash}&sni={sni_domain}#{link_hash}"
+    else:
+        hysteria_link = f"hysteria2://{password}@{public_ip}:{port}?insecure=1&sni={sni_domain}#{link_hash}"
     
     print_success("Active Hysteria 2 configuration successfully reconstructed!")
     print(f"  • {BOLD}Protocol:{RESET} Hysteria 2")
