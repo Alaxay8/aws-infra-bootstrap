@@ -926,19 +926,6 @@ def setup_hysteria2(public_ip, geo_info):
     os.chmod(key_path, 0o600)
     os.chmod(cert_path, 0o644)
     
-    # Ensure hysteria user has read access to its certificates and configs
-    hysteria_user = "hysteria"
-    svc_path = "/etc/systemd/system/hysteria-server.service"
-    if os.path.exists(svc_path):
-        try:
-            with open(svc_path, "r") as f:
-                content = f.read()
-            match = re.search(r"^User=(\w+)", content, re.MULTILINE)
-            if match:
-                hysteria_user = match.group(1).strip()
-        except Exception:
-            pass
-    run_cmd(f"chown -R {hysteria_user}:{hysteria_user} /etc/hysteria", check=False)
     
     # 8. Build Hysteria 2 config.yaml
     print_info("Building Hysteria 2 configuration file...")
@@ -982,6 +969,25 @@ masquerade:
         print_warning(f"Could not cache Hysteria 2 metadata: {e}")
         
     print_success(f"Configuration successfully written to {config_yaml_path}")
+    
+    # Ensure hysteria user has read access to all its certificates, configurations, and cache files
+    hysteria_user = "hysteria"
+    for svc_path in [
+        "/etc/systemd/system/hysteria-server.service",
+        "/lib/systemd/system/hysteria-server.service",
+        "/usr/lib/systemd/system/hysteria-server.service"
+    ]:
+        if os.path.exists(svc_path):
+            try:
+                with open(svc_path, "r") as f:
+                    content = f.read()
+                match = re.search(r"^User=(\w+)", content, re.MULTILINE)
+                if match:
+                    hysteria_user = match.group(1).strip()
+                    break
+            except Exception:
+                pass
+    run_cmd(f"chown -R {hysteria_user}:{hysteria_user} /etc/hysteria", check=False)
     
     # 9. Start and enable systemd service
     print_info("Starting and enabling Hysteria 2 systemd service...")
