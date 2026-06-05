@@ -883,8 +883,23 @@ def setup_hysteria2(public_ip, geo_info):
     print_info("Installing pre-requisites (curl, openssl)...")
     run_cmd("apt-get update && apt-get install -y curl openssl")
 
-    print_info("Downloading and installing/updating Hysteria 2 via official script...")
-    run_cmd("curl -fsSL https://get.hy2.sh/ | bash")
+    print_info("Downloading Hysteria 2 installer script...")
+    installer_path = "/tmp/install_hysteria.sh"
+    run_cmd(f"curl -fsSL -o {installer_path} https://get.hy2.sh/")
+    run_cmd(f"chmod +x {installer_path}")
+    
+    print_info("Running Hysteria 2 installer...")
+    try:
+        subprocess.run(f"bash {installer_path}", shell=True, check=True)
+    except subprocess.CalledProcessError as e:
+        print_error(f"Hysteria 2 installer failed: {e}")
+        return
+    finally:
+        if os.path.exists(installer_path):
+            try:
+                os.remove(installer_path)
+            except Exception:
+                pass
     
     # 7. Generate self-signed TLS certificate
     print_info("Generating self-signed certificate for Hysteria 2...")
